@@ -5,6 +5,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const {
   TELEGRAM_BOT_TOKEN,
   GOOGLE_SCRIPT_URL,
+  OCR_SPACE_API_KEY,
   ALLOWED_CHAT_ID,
   TIMEZONE = 'Asia/Jakarta'
 } = process.env;
@@ -29,6 +30,10 @@ bot.onText(/^\/start$/, (message) => {
       'Cek saldo:',
       '/tabungan',
       '',
+      'Foto struk:',
+      'Kirim foto dengan caption: keluar 15000 Makan siang',
+      'Atau isi OCR_SPACE_API_KEY agar bot bisa baca nominal dari foto.',
+      '',
       'Kolom spreadsheet: tanggal, jenis, jumlah, keterangan'
     ].join('\n')
   );
@@ -42,6 +47,10 @@ bot.onText(/^\/format$/, (message) => {
       'masuk 50000 Gaji freelance',
       'keluar 15000 Makan siang',
       '/rekap 2026-06-19 masuk 250000 Penjualan produk',
+      '',
+      'Contoh foto:',
+      'Kirim foto struk dengan caption: keluar 15000 Belanja',
+      'Kalau OCR aktif, foto tanpa caption akan dicatat sebagai keluar.',
       '',
       'Jenis yang diterima: masuk dan keluar.'
     ].join('\n')
@@ -63,8 +72,51 @@ bot.onText(/^\/tabungan$/, async (message) => {
   }
 });
 
+bot.on('photo', async (message) => {
+  if (!isAllowedChat(message.chat.id)) {
+    await bot.sendMessage(message.chat.id, 'Chat ini belum diizinkan untuk mengisi rekap.');
+    return;
+  }
+
+  try {
+    let parsed = null;
+
+    if (message.caption) {
+      parsed = parseFinancialMessage(message.caption);
+    }
+
+    if (!parsed) {
+      if (!OCR_SPACE_API_KEY) {
+        await bot.sendMessage(
+          message.chat.id,
+          [
+            'Foto diterima, tapi OCR belum aktif.',
+            'Pakai caption dulu seperti ini:',
+            'keluar 15000 Makan siang',
+            '',
+            'Kalau mau otomatis baca nominal dari foto, isi OCR_SPACE_API_KEY di .env.'
+          ].join('\n')
+        );
+        return;
+      }
+
+      await bot.sendMessage(message.chat.id, 'Foto diterima. Sedang membaca nominal dari gambar...');
+      parsed = await parseExpenseFromPhoto(message);
+    }
+
+    const result = await appendRow(parsed);
+    await bot.sendMessage(
+      message.chat.id,
+      buildSuccessMessage(parsed, result.summary).join('\n')
+    );
+  } catch (error) {
+    console.error(error);
+    await bot.sendMessage(message.chat.id, 'Gagal membaca atau menyimpan foto. Coba kirim foto lebih jelas atau pakai caption: keluar 15000 keterangan.');
+  }
+});
+
 bot.on('message', async (message) => {
-  if (!message.text || message.text.startsWith('/start') || message.text.startsWith('/format') || message.text.startsWith('/tabungan')) {
+  if (!message.text || message.photo || message.text.startsWith('/start') || message.text.startsWith('/format') || message.text.startsWith('/tabungan')) {
     return;
   }
 
@@ -268,6 +320,77 @@ async function getSummary() {
   }
 
   return result;
+}
+
+async function parseExpenseFromPhoto(message) {
+  const text = await readTextFromPhoto(message);
+  const jumlah = extractLargestAmount(text);
+
+  if (!jumlah) {
+    throw new Error('Nominal tidak ditemukan dari hasil OCR.');
+  }
+
+  return {
+    tanggal: getToday(),
+    jenis: 'keluar',
+    jumlah,
+    keterangan: 'Foto pengeluaran'
+  };
+}
+
+async function readTextFromPhoto(message) {
+  const photo = message.photo[message.photo.length - 1];
+  const fileUrl = await bot.getFileLink(photo.file_id);
+  const imageResponse = await fetch(fileUrl);
+
+  if (!imageResponse.ok) {
+    throw new Error(`Gagal mengambil foto Telegram: ${imageResponse.status}`);
+  }
+
+  const imageBuffer = await imageResponse.arrayBuffer();
+  const imageBlob = new Blob([imageBuffer], {
+    type: imageResponse.headers.get('content-type') || 'image/jpeg'
+  });
+
+  const formData = new FormData();
+  formData.append('apikey', OCR_SPACE_API_KEY);
+  formData.append('language', 'eng');
+  formData.append('isOverlayRequired', 'false');
+  formData.append('scale', 'true');
+  formData.append('OCREngine', '2');
+  formData.append('file', imageBlob, 'telegram-photo.jpg');
+
+  const ocrResponse = await fetch('https://api.ocr.space/parse/image', {
+    method: 'POST',
+    body: formData
+  });
+
+  if (!ocrResponse.ok) {
+    throw new Error(`OCR gagal: ${ocrResponse.status}`);
+  }
+
+  const result = await ocrResponse.json();
+  if (result.IsErroredOnProcessing) {
+    throw new Error(result.ErrorMessage || 'OCR gagal memproses gambar.');
+  }
+
+  return (result.ParsedResults || [])
+    .map((item) => item.ParsedText)
+    .filter(Boolean)
+    .join('\n');
+}
+
+function extractLargestAmount(text) {
+  const matches = text.match(/(?:rp\s*)?[\d]{1,3}(?:[.,\s]\d{3})+(?:,\d{1,2})?|(?:rp\s*)?\d{4,}/gi) || [];
+  const numbers = matches
+    .map(parseJumlah)
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  if (numbers.length === 0) {
+    return null;
+  }
+
+  return Math.max(...numbers);
 }
 
 function formatRupiah(value) {

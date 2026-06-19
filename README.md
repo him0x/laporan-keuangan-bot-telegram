@@ -27,6 +27,7 @@ copy .env.example .env
 ```env
 TELEGRAM_BOT_TOKEN=token_dari_botfather
 GOOGLE_SCRIPT_URL=https://script.google.com/macros/s/xxxx/exec
+OCR_SPACE_API_KEY=
 ```
 
 4. Buat Google Apps Script di spreadsheet, lalu deploy sebagai Web App.
@@ -144,6 +145,33 @@ Cek tabungan kapan saja:
 ```text
 /tabungan
 ```
+
+## Input dari Foto
+
+Cara paling simpel, kirim foto struk dengan caption:
+
+```text
+keluar 15000 Makan siang
+```
+
+Bot akan menyimpan caption itu sebagai transaksi `keluar`.
+
+Kalau ingin bot membaca nominal otomatis dari foto, isi `OCR_SPACE_API_KEY` di `.env`.
+
+```env
+OCR_SPACE_API_KEY=api_key_ocr_space
+```
+
+Jika foto dikirim tanpa caption dan OCR aktif, bot akan:
+
+```text
+1. Membaca teks dari gambar
+2. Mengambil nominal terbesar yang terbaca
+3. Menyimpan sebagai jenis keluar
+4. Mengisi keterangan: Foto pengeluaran
+```
+
+Catatan: hasil OCR tergantung kualitas foto. Kalau struk buram, miring, atau nominal tidak jelas, lebih aman kirim foto dengan caption.
 
 Jenis yang diterima:
 
