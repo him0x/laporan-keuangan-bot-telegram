@@ -167,6 +167,10 @@ function buildSuccessMessage(data, summary) {
     `Keterangan: ${data.keterangan}`
   ];
 
+  if (data.receipt) {
+    lines.push('', ...buildReceiptLines(data.receipt));
+  }
+
   if (summary) {
     lines.push(
       '',
@@ -175,6 +179,32 @@ function buildSuccessMessage(data, summary) {
       `Total keluar: ${formatRupiah(summary.totalKeluar)}`,
       `Saldo: ${formatRupiah(summary.saldo)}`
     );
+  }
+
+  return lines;
+}
+
+function buildReceiptLines(receipt) {
+  const lines = ['Detail nota:'];
+
+  receipt.items.slice(0, 10).forEach((item) => {
+    const qty = item.qty ? `${item.qty}x ` : '';
+    const price = item.price ? `${formatRupiah(item.price)} ` : '';
+    lines.push(`${qty}${price}${item.name} ${formatRupiah(item.amount)}`);
+  });
+
+  if (receipt.items.length > 10) {
+    lines.push(`...dan ${receipt.items.length - 10} item lain`);
+  }
+
+  lines.push(`Total: ${formatRupiah(receipt.total)}`);
+
+  if (receipt.cash) {
+    lines.push(`Cash/Tunai: ${formatRupiah(receipt.cash)}`);
+  }
+
+  if (receipt.change) {
+    lines.push(`Kembalian: ${formatRupiah(receipt.change)}`);
   }
 
   return lines;
@@ -267,7 +297,36 @@ function normalizeJenis(value = '') {
 }
 
 function parseJumlah(value) {
-  const cleaned = value.replace(/[^\d,.-]/g, '').replace(/\./g, '').replace(',', '.');
+  const raw = value.replace(/[^\d,.-]/g, '');
+  const hasDot = raw.includes('.');
+  const hasComma = raw.includes(',');
+
+  if (hasDot && hasComma) {
+    const lastDot = raw.lastIndexOf('.');
+    const lastComma = raw.lastIndexOf(',');
+    const decimalSeparator = lastDot > lastComma ? '.' : ',';
+    const thousandsSeparator = decimalSeparator === '.' ? ',' : '.';
+    const normalized = raw
+      .replace(new RegExp(`\\${thousandsSeparator}`, 'g'), '')
+      .replace(decimalSeparator, '.');
+    return Number(normalized);
+  }
+
+  if (hasComma) {
+    const parts = raw.split(',');
+    const lastPart = parts[parts.length - 1];
+    const commaIsThousands = lastPart.length === 3 && parts.length <= 3;
+    return Number(commaIsThousands ? raw.replace(/,/g, '') : raw.replace(',', '.'));
+  }
+
+  if (hasDot) {
+    const parts = raw.split('.');
+    const lastPart = parts[parts.length - 1];
+    const dotIsThousands = lastPart.length === 3 && parts.length <= 3;
+    return Number(dotIsThousands ? raw.replace(/\./g, '') : raw);
+  }
+
+  const cleaned = raw;
   return Number(cleaned);
 }
 
@@ -324,7 +383,8 @@ async function getSummary() {
 
 async function parseExpenseFromPhoto(message) {
   const text = await readTextFromPhoto(message);
-  const jumlah = extractLargestAmount(text);
+  const receipt = parseReceiptText(text);
+  const jumlah = receipt.total;
 
   if (!jumlah) {
     throw new Error('Nominal tidak ditemukan dari hasil OCR.');
@@ -334,7 +394,8 @@ async function parseExpenseFromPhoto(message) {
     tanggal: getToday(),
     jenis: 'keluar',
     jumlah,
-    keterangan: 'Foto pengeluaran'
+    keterangan: buildReceiptDescription(receipt),
+    receipt
   };
 }
 
@@ -380,17 +441,215 @@ async function readTextFromPhoto(message) {
     .join('\n');
 }
 
-function extractLargestAmount(text) {
-  const matches = text.match(/(?:rp\s*)?[\d]{1,3}(?:[.,\s]\d{3})+(?:,\d{1,2})?|(?:rp\s*)?\d{4,}/gi) || [];
-  const numbers = matches
-    .map(parseJumlah)
-    .filter((value) => Number.isFinite(value) && value > 0);
+function parseReceiptText(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 
-  if (numbers.length === 0) {
+  const items = extractReceiptItems(lines);
+  const labels = extractReceiptLabels(lines);
+  const total = labels.total || inferTotalFromItems(items) || extractReceiptTotal(lines);
+
+  return {
+    items,
+    total,
+    cash: labels.cash,
+    change: labels.change
+  };
+}
+
+function extractReceiptItems(lines) {
+  const ignored = /total|subtotal|sub total|cash|tunai|bayar|change|kembali|pajak|tax|ppn|diskon|discount|tanggal|date|jam|time|nota|struk|invoice/i;
+  const items = [];
+
+  lines.forEach((line) => {
+    if (ignored.test(line)) {
+      return;
+    }
+
+    const item = parseReceiptItemLine(line);
+    if (item) {
+      items.push(item);
+    }
+  });
+
+  return items;
+}
+
+function parseReceiptItemLine(line) {
+  const normalized = line.replace(/\s+/g, ' ').trim();
+
+  const qtyFirst = normalized.match(/^(\d+)\s*x?\s+([\d.,]+)\s+(.+?)\s+(?:rp\s*)?([\d.,]+)$/i);
+  if (qtyFirst) {
+    return {
+      qty: Number(qtyFirst[1]),
+      price: parseJumlah(qtyFirst[2]),
+      name: cleanItemName(qtyFirst[3]),
+      amount: parseJumlah(qtyFirst[4])
+    };
+  }
+
+  const nameFirst = normalized.match(/^(.+?)\s+(\d+)\s*x?\s+([\d.,]+)\s+(?:rp\s*)?([\d.,]+)$/i);
+  if (nameFirst) {
+    return {
+      qty: Number(nameFirst[2]),
+      price: parseJumlah(nameFirst[3]),
+      name: cleanItemName(nameFirst[1]),
+      amount: parseJumlah(nameFirst[4])
+    };
+  }
+
+  const simple = normalized.match(/^(.+?)\s+(?:rp\s*)?([\d.,]+)$/i);
+  if (simple && /[a-z]/i.test(simple[1])) {
+    const amount = parseJumlah(simple[2]);
+
+    if (amount >= 1000) {
+      return {
+        qty: null,
+        price: null,
+        name: cleanItemName(simple[1]),
+        amount
+      };
+    }
+  }
+
+  return null;
+}
+
+function extractReceiptLabels(lines) {
+  const labels = {
+    total: null,
+    cash: null,
+    change: null
+  };
+
+  lines.forEach((line) => {
+    const lowerLine = line.toLowerCase();
+    const amounts = extractAmounts(line);
+    const amount = amounts[amounts.length - 1];
+
+    if (!amount) {
+      return;
+    }
+
+    if (/(grand\s*total|total\s*(bayar|belanja|tagihan)?|jumlah\s*bayar|amount\s*due)/i.test(lowerLine) && !/(subtotal|sub\s*total)/i.test(lowerLine)) {
+      labels.total = amount;
+      return;
+    }
+
+    if (/(cash|tunai|uang\s*bayar|bayar)/i.test(lowerLine) && !/(total|jumlah)/i.test(lowerLine)) {
+      labels.cash = amount;
+      return;
+    }
+
+    if (/(change|kembali|kembalian)/i.test(lowerLine)) {
+      labels.change = amount;
+    }
+  });
+
+  return labels;
+}
+
+function inferTotalFromItems(items) {
+  if (items.length === 0) {
     return null;
   }
 
-  return Math.max(...numbers);
+  return items.reduce((total, item) => total + item.amount, 0);
+}
+
+function extractReceiptTotal(lines) {
+  const totalKeywords = [
+    'grand total',
+    'total bayar',
+    'total belanja',
+    'total tagihan',
+    'jumlah bayar',
+    'amount due',
+    'total'
+  ];
+
+  const ignoredKeywords = [
+    'subtotal',
+    'sub total',
+    'diskon',
+    'discount',
+    'pajak',
+    'tax',
+    'ppn',
+    'kembali',
+    'change',
+    'tunai',
+    'cash',
+    'tanggal',
+    'date',
+    'jam',
+    'time',
+    'no.',
+    'nota',
+    'struk'
+  ];
+
+  const scoredAmounts = [];
+
+  lines.forEach((line, index) => {
+    const lowerLine = line.toLowerCase();
+    const amounts = extractAmounts(line);
+
+    amounts.forEach((amount) => {
+      let score = 0;
+
+      if (totalKeywords.some((keyword) => lowerLine.includes(keyword))) {
+        score += 100;
+      }
+
+      if (ignoredKeywords.some((keyword) => lowerLine.includes(keyword))) {
+        score -= 50;
+      }
+
+      score += Math.min(index, 30);
+      score += Math.min(amount / 100000, 20);
+
+      scoredAmounts.push({ amount, score });
+    });
+  });
+
+  if (scoredAmounts.length === 0) {
+    return null;
+  }
+
+  scoredAmounts.sort((a, b) => b.score - a.score || b.amount - a.amount);
+  return scoredAmounts[0].amount;
+}
+
+function buildReceiptDescription(receipt) {
+  if (receipt.items.length === 0) {
+    return 'Foto pengeluaran';
+  }
+
+  const names = receipt.items
+    .slice(0, 3)
+    .map((item) => item.name)
+    .join(', ');
+
+  const suffix = receipt.items.length > 3 ? ` +${receipt.items.length - 3} item` : '';
+  return `Foto: ${names}${suffix}`;
+}
+
+function cleanItemName(name) {
+  return name
+    .replace(/\s+/g, ' ')
+    .replace(/rp$/i, '')
+    .trim();
+}
+
+function extractAmounts(text) {
+  const matches = text.match(/(?:rp\s*)?[\d]{1,3}(?:[.,\s]\d{3})+(?:,\d{1,2})?|(?:rp\s*)?\d{4,}/gi) || [];
+
+  return matches
+    .map(parseJumlah)
+    .filter((value) => Number.isFinite(value) && value > 0);
 }
 
 function formatRupiah(value) {

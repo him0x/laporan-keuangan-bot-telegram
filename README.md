@@ -166,10 +166,23 @@ Jika foto dikirim tanpa caption dan OCR aktif, bot akan:
 
 ```text
 1. Membaca teks dari gambar
-2. Mengambil nominal terbesar yang terbaca
+2. Mencari baris total/jumlah bayar/grand total
 3. Menyimpan sebagai jenis keluar
-4. Mengisi keterangan: Foto pengeluaran
+4. Menampilkan detail item, cash/tunai, dan kembalian jika terbaca
 ```
+
+Contoh hasil baca nota:
+
+```text
+Detail nota:
+1x Rp45.000 sate kambing Rp45.000
+1x Rp45.000 sate lembu Rp45.000
+Total: Rp337.000
+Cash/Tunai: Rp350.000
+Kembalian: Rp13.000
+```
+
+Yang mengurangi saldo adalah `Total`, bukan `Cash/Tunai` dan bukan `Kembalian`.
 
 Catatan: hasil OCR tergantung kualitas foto. Kalau struk buram, miring, atau nominal tidak jelas, lebih aman kirim foto dengan caption.
 
