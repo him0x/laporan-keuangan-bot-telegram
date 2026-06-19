@@ -1,0 +1,20 @@
+{
+  "name": "rekap-keuangan-telegram-sheets",
+  "version": "1.0.0",
+  "description": "Bot Telegram untuk rekap laporan keuangan ke Google Spreadsheet.",
+  "main": "src/bot.js",
+  "scripts": {
+    "start": "node src/bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "google-sheets",
+    "laporan-keuangan"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
